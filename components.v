@@ -1,12 +1,24 @@
 Require Import Arith Omega List.
 
+Definition is_true : bool -> Prop := fun b => b = true.
+Coercion is_true : bool >-> Sortclass.
+
 Module Type VAL.
   (** The uninterpreted type of values communicated on wires. 
       In a concrete implementation, [t] might equal [bit] or [bool]. *)
   Parameter t : Type.
-
-  (** R1: The type [t] is inhabited. *)
   Parameter init_t : t.
+
+  (** We can coerce bus values to type [bool]. *)
+  Parameter is_true : t -> bool.
+
+  (** There are two bus-value constructors... *)
+  Parameter high : t.
+  Parameter low : t.
+
+  (** ...satisfying the following properties: *)
+  Parameter high_is_true : is_true high = true.
+  Parameter low_is_false : is_true low = false.
 End VAL.  
 
 Module Type DELAY.
@@ -168,3 +180,243 @@ Module Delay1Bus_of_DelayNBus (V : VAL) : DELAY_1_BUS V.
     destruct (Delay1Bus.step_values v_in s_in) as [H1 _]; auto.
   Qed.
 End Delay1Bus_of_DelayNBus.
+
+Module Type PRIMARY_SIDE.
+  Parameter is_primary : bool.
+End PRIMARY_SIDE.  
+
+Module Type PILOT_FLYING_SYSTEM (V : VAL) (P : PRIMARY_SIDE).
+  Notation val := V.t.
+  Notation is_true := V.is_true.
+  Coercion is_true : val >-> bool.
+  Notation is_primary := P.is_primary.
+  
+  (* The uninterpreted type of FGS side states *)
+  Parameter state : Type.
+  Parameter init_state : state.
+
+  (* The transition function *)
+  Parameter step : forall (ts ospf : val) (s : state), state.
+
+  (* Projections for accessing parts of the state *)
+  Parameter pre_TS : state -> val.
+  Parameter pre_OSPF : state -> val.
+
+  (* Is this the flying side? *)
+  Parameter pilot_flying : state -> bool.
+
+  (* Auxiliary functions for stating requirements *)
+  Definition rise (s : state) (old : state -> bool) (new : bool) : bool :=
+    negb (old s) && new.
+  Definition rise_ts (s : state) (ts : bool) : bool := rise s pre_TS ts.
+  Definition rise_ospf (s : state) (ospf : bool) : bool := rise s pre_OSPF ospf.
+
+  (*** High-level requirements ***)
+
+  (* This side is flying initially only if it's the primary side. *)
+  Axiom hlr1 : pilot_flying init_state = is_primary.
+
+  (* pre_TS set to true initially -- this ensures that we don't respond 
+     to a spurious rising edge in the initial state. *)
+  Axiom hlr2 : is_true (pre_TS init_state).
+
+  (* pre_OSPF set to true if other side is flying, otherwise false. *)
+  Axiom hlr3 : is_true (pre_OSPF init_state) = negb is_primary.
+
+  (* If this side is flying and we observe a rising edge on the OSPF channel, 
+     then we're no longer flying in the next state. *)
+  Axiom hlr4 :
+    forall (s : state) (ts ospf : val),
+      pilot_flying s = true ->
+      rise_ospf s ospf = true ->
+      pilot_flying (step ts ospf s) = false.
+
+  (* If this side is flying and we DON'T observe a rising OSPF edge, 
+     then we continue flying in the next state. *)
+  Axiom hlr5 :
+    forall (s : state) (ts ospf : val),
+      pilot_flying s = true ->
+      rise_ospf s ospf = false ->
+      pilot_flying (step ts ospf s) = true.
+
+  (* If this side isn't flying and we observe a rise TS edge, 
+     then we're flying in the next state. *)
+  Axiom hlr6 :
+    forall (s : state) (ts ospf : val),
+      pilot_flying s = false->
+      rise_ts s ts = true ->
+      pilot_flying (step ts ospf s) = true.
+
+  (* If this side isn't flying and we DON'T observe a rise TS edge, 
+     then we're NOT flying in the next state. *)
+  Axiom hlr7 :
+    forall (s : state) (ts ospf : val),
+      pilot_flying s = false ->
+      rise_ts s ts = false ->
+      pilot_flying (step ts ospf s) = false.
+
+  (* pre_TS is updated at each step to equal the incoming value on the 
+     TS channel *)
+  Axiom hlr8 :
+    forall (s : state) (ts ospf : val),
+      pre_TS (step ts ospf s) = ts.
+
+  (* pre_OSPF is updated at each step to equal the incoming value on the 
+     OSPF channel *)
+  Axiom hlr9 :
+    forall (s : state) (ts ospf : val),
+      pre_OSPF (step ts ospf s) = ospf.
+End PILOT_FLYING_SYSTEM.
+
+Module PilotFlyingSystem (V : VAL) (P : PRIMARY_SIDE) : PILOT_FLYING_SYSTEM V P.
+  Notation val := V.t.
+  Notation is_true := V.is_true.
+  Coercion is_true : val >-> bool.
+  Notation is_primary := P.is_primary.
+
+  Inductive PilotFlyingSide : Type := PilotFlying | NotPilotFlying.
+  
+  Record the_state : Type :=                                                           
+    mkState {
+        status : PilotFlyingSide;
+        pre_TS : val;
+        pre_OSPF : val
+      }.
+  Definition state : Type := the_state.
+
+  Definition init_state : state :=
+    mkState
+      (if is_primary then PilotFlying else NotPilotFlying)
+      (* pre_TS = *) V.high
+      (* pre_OSPF = *) (if is_primary then V.low else V.high).
+
+  Definition rise (s : state) (old : state -> bool) (new : bool) : bool :=
+    negb (old s) && new.
+  Definition rise_ts (s : state) (ts : bool) : bool := rise s pre_TS ts.
+  Definition rise_ospf (s : state) (ospf : bool) : bool := rise s pre_OSPF ospf.
+  
+  Definition step (ts ospf : val) (s : state) : state :=
+    let next_pfs :=
+        match status s with
+        (* Transition 1: Other side becomes the flying side *)
+        | PilotFlying =>
+          if rise_ospf s ospf then NotPilotFlying else PilotFlying
+
+        (* Transition 2: Transfer switch pressed *)
+        | NotPilotFlying =>
+          if rise_ts s ts then PilotFlying else NotPilotFlying
+        end
+    in
+    mkState next_pfs ts ospf.
+
+  Definition pilot_flying (s : state) : bool :=
+    match status s with
+    | PilotFlying => true
+    | NotPilotFlying => false
+    end.
+
+  (* This side is flying initially only if it's the primary side. *)
+  Lemma hlr1 : pilot_flying init_state = is_primary.
+  Proof.
+    unfold pilot_flying, init_state; simpl.
+    destruct is_primary; auto.
+  Qed.    
+
+  (* pre_TS set to true initially -- this ensures that we don't respond 
+     to a spurious rising edge in the initial state. *)
+  Lemma hlr2 : is_true (pre_TS init_state).
+  Proof. 
+    unfold init_state, pre_TS; simpl.
+    apply V.high_is_true.
+  Qed.    
+    
+  (* pre_OSPF set to true if other side is flying, otherwise false. *)
+  Lemma hlr3 : is_true (pre_OSPF init_state) = negb is_primary.
+  Proof.
+    unfold init_state, pre_OSPF; simpl; destruct is_primary; simpl.
+    { apply V.low_is_false. }
+    apply V.high_is_true.
+  Qed.    
+
+  (* If this side is flying and we observe a rising edge on the OSPF channel, 
+     then we're no longer flying in the next state. *)
+  Lemma hlr4 :
+    forall (s : state) (ts ospf : val),
+      pilot_flying s = true ->
+      rise_ospf s ospf = true ->
+      pilot_flying (step ts ospf s) = false.
+  Proof.
+    intros s ts ospf; unfold pilot_flying, rise_ospf; simpl; destruct (status s).
+    { intros _; unfold rise_ospf; intros ->; auto. }
+    inversion 1.
+  Qed.    
+
+  (* If this side is flying and we DON'T observe a rising OSPF edge, 
+     then we continue flying in the next state. *)
+  Lemma hlr5 :
+    forall (s : state) (ts ospf : val),
+      pilot_flying s = true ->
+      rise_ospf s ospf = false ->
+      pilot_flying (step ts ospf s) = true.
+  Proof.
+    intros s ts ospf; unfold pilot_flying, rise_ospf; simpl; destruct (status s).
+    { intros _; unfold rise_ospf; intros ->; auto. }
+    inversion 1.
+  Qed.    
+
+  (* If this side isn't flying and we observe a rising TS edge, 
+     then we're flying in the next state. *)
+  Lemma hlr6 :
+    forall (s : state) (ts ospf : val),
+      pilot_flying s = false ->
+      rise_ts s ts = true ->
+      pilot_flying (step ts ospf s) = true.
+  Proof.
+    intros s ts ospf; unfold pilot_flying, rise_ospf; simpl; destruct (status s).
+    { inversion 1. }
+    intros _; unfold rise_ts; intros ->; auto.
+  Qed.    
+
+  (* If this side isn't flying and we DON'T observe a rising TS edge, 
+     then we're NOT flying in the next state. *)
+  Lemma hlr7 :
+    forall (s : state) (ts ospf : val),
+      pilot_flying s = false ->
+      rise_ts s ts = false ->
+      pilot_flying (step ts ospf s) = false.
+  Proof.
+    intros s ts ospf; unfold pilot_flying, rise_ospf; simpl; destruct (status s).
+    { inversion 1. }
+    intros _; unfold rise_ts; intros ->; auto.
+  Qed.    
+
+  (* pre_TS is updated at each step to equal the incoming value on the 
+     TS channel *)
+  Lemma hlr8 :
+    forall (s : state) (ts ospf : val),
+      pre_TS (step ts ospf s) = ts.
+  Proof. auto. Qed.
+
+  (* pre_OSPF is updated at each step to equal the incoming value on the 
+     OSPF channel *)
+  Lemma hlr9 :
+    forall (s : state) (ts ospf : val),
+      pre_OSPF (step ts ospf s) = ospf.
+  Proof. auto. Qed.
+End PilotFlyingSystem.
+
+
+        
+                   
+    
+        
+
+  
+  
+
+
+  
+  
+
+  
+  
