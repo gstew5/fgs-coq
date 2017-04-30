@@ -7,7 +7,7 @@ Module Type VAL.
   (** The uninterpreted type of values communicated on wires. 
       In a concrete implementation, [t] might equal [bit] or [bool]. *)
   Parameter t : Type.
-  Parameter init_t : t.
+  Parameter init : t.
 
   (** We can coerce bus values to type [bool]. *)
   Parameter is_true : t -> bool.
@@ -99,7 +99,7 @@ Module DelayNBus (V : VAL) (D : DELAY).
   Next Obligation. destruct s_in as [l e]; auto. Qed.
 
   Definition value i (pf : i < delay) (s : state) : val :=
-    List.nth i (list_of_state s) V.init_t.
+    List.nth i (list_of_state s) V.init.
   
   Lemma step_values : 
     forall (v_in : val)
@@ -126,8 +126,8 @@ Module DelayNBus (V : VAL) (D : DELAY).
     assert (H1: i < length (removelast (t::l0))).
     { revert H0; generalize (removelast (t::l0)); simpl.
       intros l H; omega. }
-    assert (nth (S i) (v_in :: removelast (t :: l0)) V.init_t =
-            nth i (removelast (t :: l0)) V.init_t) as -> by auto.
+    assert (nth (S i) (v_in :: removelast (t :: l0)) V.init =
+            nth i (removelast (t :: l0)) V.init) as -> by auto.
     rewrite nth_removelast; auto.
   Qed.    
 End DelayNBus.
@@ -147,7 +147,10 @@ Module Type DELAY_1_BUS (V : VAL).
   (* R1: There exists an initial state. *)
   Axiom init_state : state.
 
-  (* R2: *)
+  (* R2: The output of the initial state is the default value V.init. *)
+  Axiom init_state_output : output init_state = V.init.
+
+  (* R3: *)
   Axiom step_output :
     forall (v_in : val) (s_in : state),
       let s_out := step v_in s_in in
@@ -171,6 +174,10 @@ Module Delay1Bus_of_DelayNBus (V : VAL) : DELAY_1_BUS V.
   Definition output (s : state) : val :=
     Delay1Bus.value 0 Delay1.gt0 s.
 
+  Lemma init_state_output : output init_state = V.init.
+  Proof.
+    unfold init_state, output; simpl.
+
   Lemma step_output :
     forall (v_in : val) (s_in : state),
       let s_out := step v_in s_in in
@@ -185,7 +192,7 @@ Module Type PRIMARY_SIDE.
   Parameter is_primary : bool.
 End PRIMARY_SIDE.  
 
-Module Type PILOT_FLYING_SYSTEM (V : VAL) (P : PRIMARY_SIDE).
+Module Type PILOT_FLYING_SYSTEM_SIDE (V : VAL) (P : PRIMARY_SIDE).
   Notation val := V.t.
   Notation is_true := V.is_true.
   Coercion is_true : val >-> bool.
@@ -266,9 +273,11 @@ Module Type PILOT_FLYING_SYSTEM (V : VAL) (P : PRIMARY_SIDE).
   Axiom hlr9 :
     forall (s : state) (ts ospf : val),
       pre_OSPF (step ts ospf s) = ospf.
-End PILOT_FLYING_SYSTEM.
+End PILOT_FLYING_SYSTEM_SIDE.
 
-Module PilotFlyingSystem (V : VAL) (P : PRIMARY_SIDE) : PILOT_FLYING_SYSTEM V P.
+Module PilotFlyingSystem_Side (V : VAL) (P : PRIMARY_SIDE)
+  : PILOT_FLYING_SYSTEM_SIDE V P.
+      
   Notation val := V.t.
   Notation is_true := V.is_true.
   Coercion is_true : val >-> bool.
@@ -403,20 +412,71 @@ Module PilotFlyingSystem (V : VAL) (P : PRIMARY_SIDE) : PILOT_FLYING_SYSTEM V P.
     forall (s : state) (ts ospf : val),
       pre_OSPF (step ts ospf s) = ospf.
   Proof. auto. Qed.
-End PilotFlyingSystem.
+End PilotFlyingSystem_Side.
 
+Module BoolInitHigh : VAL.
+  Definition t := bool.                          
+  Definition init_t := true.
+  Definition is_true (b : t) : bool := b.
+  Definition high := true.
+  Definition low := false.
+  Lemma high_is_true : is_true high = true.
+  Proof. unfold is_true, high; reflexivity. Qed.
+  Lemma low_is_false : is_true low = false.
+  Proof. unfold is_true, low; reflexivity. Qed.
+End BoolInitHigh.    
 
-        
-                   
+Module BoolInitLow : VAL.
+  Definition t := bool.                          
+  Definition init_t := false.
+  Definition is_true (b : t) : bool := b.
+  Definition high := true.
+  Definition low := false.
+  Lemma high_is_true : is_true high = true.
+  Proof. unfold is_true, high; reflexivity. Qed.
+  Lemma low_is_false : is_true low = false.
+  Proof. unfold is_true, low; reflexivity. Qed.
+End BoolInitLow.    
+
+Module PilotFlyingSystem.
+  Module LeftSidePrimary : PRIMARY_SIDE. Definition is_primary := true.
+  End LeftSidePrimary.
+
+  Module RightSideNotPrimary : PRIMARY_SIDE. Definition is_primary := false.
+  End RightSideNotPrimary.
     
-        
+  Module Left_Side := PilotFlyingSystem_Side BoolInitHigh LeftSidePrimary.
+  Module Right_Side := PilotFlyingSystem_Side BoolInitLow RightSideNotPrimary.
 
-  
-  
+  Module LR_Bus := Delay1Bus_of_DelayNBus BoolInitHigh.
+  Module RL_Bus := Delay1Bus_of_DelayNBus BoolInitLow.
 
+  Record state : Type :=
+    mkState {
+        left_side  : Left_Side.state;
+        right_side : Right_Side.state;
 
-  
-  
+        lr_bus : LR_Bus.state;
+        rl_bus : RL_Bus.state
+      }.
 
+  Definition init_state : state :=
+    mkState
+      Left_Side.init_state
+      Right_Side.init_state
+      LR_Bus.init_state
+      RL_Bus.init_state.
+
+  (* State transition relation *)
+  Definition step (s : state) : state :=
+    let 
+  
+  (* Observable behaviors: *)
+  Definition left_pilot_flying_side (s : state) : bool :=
+    Left_Side.pilot_flying (left_side s).
+  Definition right_pilot_flying_side (s : state) : bool :=
+    Right_Side.pilot_flying (right_side s).
+End PilotFlyingSystem.
+  
   
   
