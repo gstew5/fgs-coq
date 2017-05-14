@@ -2,17 +2,17 @@
 #include <stdbool.h>
 #include <assert.h>
 
-#define N 5
+#define N 11
 
 typedef bool CODE[N];
 
-//codes 0 and 1 are initialized in main below
 CODE code0;
 CODE code1;
 
 CODE* encode(bool b) {
-  if (b) return &code1;
-  else return &code0;
+  if (b == 0) return &code0;
+  else if (b == 1) return &code1;
+  else assert(0);
 }
 
 //Hamming distance between c and d
@@ -34,7 +34,7 @@ bool decode(CODE c) {
 }
 
 bool nondet_bit(void); //nondeterministically generate a bit
-unsigned int nondet_uint(void); //nondeterministically generate an unsigned int
+int nondet_int(void); //nondeterministically generate an integer
 
 //channel model
 CODE channel;
@@ -45,8 +45,8 @@ CODE* syndrome(CODE c) {
   }
   //apply syndrome
   for (int n = 1; n <= N/2; n++) {
-    unsigned int i = nondet_uint();
-    assume (i < N);
+    int i = nondet_int();
+    __CPROVER_assume(0 <= i && i < N);    
     channel[i] = nondet_bit();
   }
   return &channel;
@@ -58,6 +58,26 @@ int main(void) {
     code0[i] = 0;
     code1[i] = 1;
   }
+
+  //encode
+  bool b1 = nondet_bit();
+  int i1 = nondet_int();
+  __CPROVER_assume(0 <= i1 && i1 < N);
+  assert((*encode(b1))[i1] == b1);
+
+  //syndrome
+  CODE c1;
+  for (int i = 0; i < N; i++) c1[i] = nondet_bit();
+  assert(hamming(c1, *syndrome(c1)) <= N/2);
+  
+  //decode
+  CODE c2;
+  for (int i = 0; i < N; i++) c2[i] = nondet_bit();
+  if (hamming(c2, code0) < hamming(c2, code1))
+    assert(decode(c2) == 0);
+  if (hamming(c2, code1) < hamming(c2, code0))
+    assert(decode(c2) == 1);
+  
   //\forall b, decode(*syndrome(*encode(b))) == b
   bool b1 = nondet_bit();
   bool b2 = decode(*syndrome(*encode(b1)));
